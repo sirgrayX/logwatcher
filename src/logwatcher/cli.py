@@ -1,19 +1,14 @@
+import argparse
 import sys
 from pathlib import Path
-from typing import Optional, List
-import argparse
-
-# Fix для относительных импортов при прямом запуске
-if __name__ == "__main__" and __package__ is None:
-    # Добавляем текущую директорию в путь
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    __package__ = "src.logwatcher"
+from typing import List, Optional
 
 
-from .watcher import watch_file
+from .watcher import LogWatcher
+from .formatter import ColorFormatter
 from .logger import get_logger
 
-logger = get_logger()
+logger = get_logger('DEBUG')
 
 
 def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
@@ -23,7 +18,7 @@ def parse_args(args: Optional[List[str]] = None) -> argparse.Namespace:
         epilog="""
 Examples:
     %(prog)s /var/log/syslog
-    %(prog)s app.log --level WARN
+    %(prog)s app.log --level WARN --no-colors
     %(prog)s /var/log/nginx/access.log --level ERROR
         """
     )
@@ -31,7 +26,7 @@ Examples:
     parser.add_argument(
         "file",
         type=Path,
-        help='Log file to watch'
+        help='Log file to watch (path)'
     )
 
     parser.add_argument(
@@ -50,16 +45,24 @@ Examples:
     )
 
     parser.add_argument(
-        "-i", "--interval",
-        type=float,
-        default=0.1,
-        help="Check interval in seconds (default: %(default)s)"
+        "--stats",
+        action="store_true",
+        default=False,
+        help="Show statistics after stopping"
     )
+
 
     parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s 0.1.0"
+    )
+
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.1,
+        help="Check interval in seconds (default: 0.1)"
     )
 
     return parser.parse_args(args)
@@ -73,40 +76,43 @@ def validate_args(args: argparse.Namespace) -> bool:
         logger.error(f"{args.file} не является файлом")
         return False
 
-    if args.interval < 0:
-        logger.error("Интервал должен быть больше нуля")
-        return False
-
     return True
+
+def create_watcher(args: argparse.Namespace) -> LogWatcher:
+    watcher = LogWatcher(
+            filename=args.file,
+            min_level=args.level,
+            use_colors=args.use_colors
+        )
+    # logger.info(f"Создан LogWacher для файла: {args.file}")
+    return watcher
+
 
 
 def main(args: Optional[List[str]] = None) -> int:
     try:
-        parsed_args = parser.parse_args()
+        parsed_args = parse_args(args)
 
         if not validate_args(parsed_args):
             return 1
 
-        logger.info("Запуск logwatcher")
-        logger.info(f"Файл: {parsed_args.file}")
-        logger.info(f"Уровень: {parsed_args.level}")
-        logger.info(f"Цвета: {'включены' if parsed_args.use_colors else 'выключены'}")
+        watcher = create_watcher(parsed_args)
+        watcher.start()
 
-        watch_file(
-            filaname=parsed_args.file,
-            min_level=parsed_args.level,
-            use_colors=file.use_colors
-        )
+        if parsed_args.stats:
+            logger.info("Статистика мониторинга:")
+            logger.info(f"   Обработано строк: {watcher.lines_processed}")
+            logger.info(f"   Найдено ошибок: {watcher.errors_found}")
 
         return 0
 
     except KeyboardInterrupt:
-        loggger.info("Прервано пользователем")
+        logger.info("Прервано пользователем")
         return 130
-    except Exception e:
+    except Exception as e:
         logger.error(f"Непредвиденная ошибка: {e}", exc_info=True)
         return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

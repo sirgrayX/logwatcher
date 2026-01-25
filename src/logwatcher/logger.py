@@ -34,7 +34,7 @@ def setup_basic_logger(level:str = "INFO") -> logging.Logger:
     return logger
 
 
-def get_logger() -> logging.Logger:
+def get_logger(lvl='INFO') -> logging.Logger:
     """
     Получает глобальный логгер.
     Если логгер ещё не создан, создаёт его с настройками по умолчанию.
@@ -46,7 +46,7 @@ def get_logger() -> logging.Logger:
     global _global_logger
 
     if _global_logger is None:
-        _global_logger = setup_basic_logger()
+        _global_logger = setup_basic_logger(lvl)
 
     return _global_logger
 
