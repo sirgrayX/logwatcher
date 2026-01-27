@@ -3,7 +3,6 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-
 from .watcher import LogWatcher
 from .formatter import ColorFormatter
 from .logger import get_logger
