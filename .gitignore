@@ -2,7 +2,7 @@
 # Python
 # ================================
 
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL файлы
 __pycache__/
 *.py[cod]
 *$py.class
@@ -11,3 +11,4 @@ __pycache__/
 .vscode/
 
 test_logs/
+.log

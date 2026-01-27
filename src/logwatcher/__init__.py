@@ -1,7 +1,15 @@
-__version__ = "0.1.0"
+from .formatter import ColorFormatter
+from .watcher import LogWatcher, WatcherConfig
+from .cli import main
+from .logger import get_logger
+
+__version__ = "0.2.0"
 __author__ = "sirgrayX"
 
-# from .cli import main
-# from .watcher import tail_file
-
-# __all__ = ["main", "tail_file"]
+__all__ = [
+    "ColorFormatter",
+    "LogWatcher",
+    "WatcherConfig",
+    "main",
+    "get_logger",
+]
