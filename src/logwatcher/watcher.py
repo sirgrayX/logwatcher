@@ -52,6 +52,7 @@ class LogWatcher:
     def __init__(
             self,
             filename: str | Path,
+            min_level: str = "WARN",
             parser: Optional[LogParser] = None,
             handlers: Optional[List[OutputHandler]] = None,
             config: Optional[WatcherConfig] = None
@@ -64,6 +65,7 @@ class LogWatcher:
             config: Конфигурация мониторинга
         """
         self.filename = Path(filename)
+        self.min_level = min_level,
         self.parser = parser or RegexLogParser()
         self.handlers = handlers or []
         self.config = config or WatcherConfig()
@@ -75,7 +77,7 @@ class LogWatcher:
         self._inode = None
         self._stop_requested = False
 
-        # self._retry_count = 0
+        self._retry_count = 0
 
         logger.debug(f"Создан LogWatcher для файла {self.filename}")
 
@@ -182,137 +184,87 @@ class LogWatcher:
                 self._state = WatcherState.ERROR
                 self._stop_requested = True
 
-    # def start(self) -> None:
-    #     """
+    def start(self) -> None:
+        """
     #     Запускает мониторинг файла
     #     """
-    #     if not self.filename.exists():
-    #         logger.error(f"Файл не найден {self.filename}")
-    #         raise FileNotFoundError(f"{self.filename} не найден!")
+        if not self.filename.exists():
+            logger.error(f"Файл не найден {self.filename}")
+            raise FileNotFoundError(f"{self.filename} не найден!")
         
-    #     # self._running = True
-    #     self._state = WatcherState.RUNNING
-    #     self._stop_requested = False
+        self._state = WatcherState.RUNNING
+        self._stop_requested = False
 
-    #     logger.info(f"Запуск мониторинга файла: {self.filename}")
-    #     logger.info(f"Минимальный уровень: {self.min_level}")
-    #     logger.info(f"Конфигурация: interval=%.2fs, rotation=%s",
-    #                self.config.check_interval, self.config.follow_rotation)
+        logger.info(f"Запуск мониторинга файла: {self.filename}")
+        logger.info(f"Минимальный уровень: {self.min_level}")
+        logger.info(f"Конфигурация: interval=%.2fs, rotation=%s",
+                   self.config.check_interval, self.config.follow_rotation)
 
-    #     try:
-    #         self._open_file()
+        try:
+            self._open_file()
             
-    #         while not self._stop_requested and self._state == WatcherState.RUNNING:
-    #             try:
-    #                 # обработка состояния паузы
-    #                 if self._state == WatcherState.PAUSED:
-    #                     time.sleep(self.config.check_interval)
-    #                     continue
+            while not self._stop_requested and self._state == WatcherState.RUNNING:
+                try:
+                    # обработка состояния паузы
+                    if self._state == WatcherState.PAUSED:
+                        time.sleep(self.config.check_interval)
+                        continue
 
-    #                 # если была ротация файла логов
-    #                 if self.config.follow_rotation and self._check_rotation():
-    #                     logger.info("Переоткрываю файл после ротации")
-    #                     self.stats['rotations_detected'] += 1
-    #                     self._open_file()
+                    # если была ротация файла логов
+                    if self.config.follow_rotation and self._check_rotation():
+                        logger.info("Переоткрываю файл после ротации")
+                        # self.stats['rotations_detected'] += 1
+                        # добавить подсчёт ротаций файла
+                        self._open_file()
 
-    #                 self._read_new_data()
+                    self._read_new_data()
 
-    #                 self._retry_count = 0
+                    self._retry_count = 0
 
-    #             except (IOError, OSError) as e:
-    #                 logger.error(f"Ошибка чтения файла: {e}")
-    #                 self._handle_read_error()
-    #             time.sleep(self.config.check_interval)
+                except (IOError, OSError) as e:
+                    logger.error(f"Ошибка чтения файла: {e}")
+                    self._handle_read_error()
+                time.sleep(self.config.check_interval)
 
-    #     except KeyboardInterrupt:
-    #         logger.info("Мониторинг прерван пользователем")
-    #     except Exception as e:
-    #         logger.error(f"Ошибка при исполнении процесса мониторинга {e}", exc_info=True)
-    #         self._state = WatcherState.ERROR
-    #         raise
-    #     finally:
-    #         self.stop()
+        except KeyboardInterrupt:
+            logger.info("Мониторинг прерван пользователем")
+        except Exception as e:
+            logger.error(f"Ошибка при исполнении процесса мониторинга {e}", exc_info=True)
+            self._state = WatcherState.ERROR
+            # добавить обработку подсчёта ошибок самой программы
+            raise
+        finally:
+            self.stop()
     
-    # def pause(self) -> None:
-    #     """Приостанавливает мониторинг, сохраняя текущую позицию в файле"""
-    #     if self._state != WatcherState.RUNNING:
-    #         logger.warning(f"Нельзя приостановить: состояние {self._state}")
-    #         return
-    #     self._state = WatcherState.PAUSED
-    #     logger.info("Мониторинг приостановлен")
+    def pause(self) -> None:
+        """Приостанавливает мониторинг, сохраняя текущую позицию в файле"""
+        if self._state != WatcherState.RUNNING:
+            logger.warning(f"Нельзя приостановить: состояние {self._state}")
+            return
+        self._state = WatcherState.PAUSED
+        logger.info("Мониторинг приостановлен")
 
-    # def resume(self) -> None:
-    #     """Возобновляет мониторинг с сохранённой позиции"""
-    #     if self._state != WatcherState.PAUSED:
-    #         logger.warning(f"Нельзя возобновить: состояние {self._state}")
-    #         return
-    #     self._state = WatcherState.RUNNING
-    #     logger.info("Мониторинг возобновлён")
+    def resume(self) -> None:
+        """Возобновляет мониторинг с сохранённой позиции"""
+        if self._state != WatcherState.PAUSED:
+            logger.warning(f"Нельзя возобновить: состояние {self._state}")
+            return
+        self._state = WatcherState.RUNNING
+        logger.info("Мониторинг возобновлён")
 
-    # def stop(self) -> None:
-    #     """
-    #     Останавливает мониторинг файлов
-    #     """
-    #     if self._file and not self._file.closed:
-    #         self._file.close()
-    #         logger.debug(f"Файл {self.filename} закрыт.")
-    #     self._stop_requested = True
-    #     self._state = WatcherState.STOPPED
+    def stop(self) -> None:
+        """
+        Останавливает мониторинг файлов
+        """
+        if self._file and not self._file.closed:
+            self._file.close()
+            logger.debug(f"Файл {self.filename} закрыт.")
+        self._stop_requested = True
+        self._state = WatcherState.STOPPED
 
-    #     if self.stats['start_time']:
-    #         duration_time = time.time() - self.stats['start_time']
-    #         logger.info("Мониторинг остановлен. Длительность: %.1f сек", duration_time)
-
-    #         if self.config.collect_stats:
-    #             self._log_stats()
-
-
-    # def get_stats(self) -> dict:
-    #     """
-    #     Возвращает статистику мониторинга.
-        
-    #     Returns:
-    #         Словарь со статистикой
-    #     """
-    #     stats = self.stats.copy()
-        
-    #     # Добавляем вычисляемые поля
-    #     if stats["start_time"]:
-    #         stats["duration"] = time.time() - stats["start_time"]
-        
-    #     stats["state"] = self._state.value
-    #     stats["config"] = {
-    #         "check_interval": self.config.check_interval,
-    #         "follow_rotation": self.config.follow_rotation,
-    #     }
-        
-    #     return stats
-
-    # def _log_stats(self) -> None:
-    #     """Логирует статистику."""
-    #     stats = self.get_stats()
-        
-    #     logger.info("=== Статистика мониторинга ===")
-    #     logger.info("Всего строк: %d", stats["total_lines"])
-    #     logger.info("По уровням:")
-    #     for level, count in stats["lines_by_level"].items():
-    #         if count > 0:
-    #             logger.info("  %s: %d", level, count)
-        
-    #     if stats["rotations_detected"] > 0:
-    #         logger.info("Ротаций обнаружено: %d", stats["rotations_detected"])
-        
-    #     if stats["errors_occurred"] > 0:
-    #         logger.info("Ошибок произошло: %d", stats["errors_occurred"])
-        
-    #     if "duration" in stats:
-    #         logger.info("Длительность: %.1f сек", stats["duration"])
-
-
-
-    # def is_running(self) -> bool:
-    #     """
-    #     Проверяет, работает ли мониторинг
-    #     """
-    #     return self._state == WatcherState.RUNNING
+    def is_running(self) -> bool:
+        """
+        Проверяет, работает ли мониторинг
+        """
+        return self._state == WatcherState.RUNNING
     
