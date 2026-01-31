@@ -1,12 +1,16 @@
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 import json
 from pathlib import Path
 import re
 from re import Pattern
-from typing import Optional
+from typing import Any, Dict, Optional
 from abc import ABC, abstractmethod
+
+from .logger import get_logger
+
+logger = get_logger()
 
 @dataclass
 class LogEntry:
@@ -38,6 +42,50 @@ class LogEntry:
             "timestamp" : self.timestamp.isoformat() if self.timestamp else None,
             "src" : self.src
         }
+    
+@dataclass
+class Event:
+    event_type: str
+    timestamp: Optional[datetime]
+    src: str
+    data: Dict[str, Any]
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
+
+
+@dataclass
+class FileRotationEvent(Event):
+
+    def __init__(self, filename: str, old_inode: Optional[int], new_inode: int):
+        super().__init__(
+            timestamp=None,
+            event_type='file_rotation',
+            src="LogWatcher",
+            data={
+                "filename" : filename,
+                "old_inode" : old_inode,
+                "new_inode" : new_inode
+            }
+        )
+
+@dataclass
+class FileTruncatedEvent(Event):
+
+    def __init__(self, filename: str, old_size: int, new_size: int):
+        super().__init__(
+            timestamp=None,
+            event_type='file_truncated',
+            src="LogWatcher",
+            data={
+                "filename" : filename,
+                "old_size" : old_size,
+                "new_size" : new_size
+            }
+        )
+
+
         
 class LogParser(ABC):
     """Абстрактный класс парсера логов."""
@@ -50,7 +98,7 @@ class OutputHandler(ABC):
     """Абстрактный класс обработчика вывода."""
 
     @abstractmethod
-    def handle(self, entry: LogEntry) -> None:
+    def handle(self, entry: LogEntry | Event) -> None:
         """
         Обрабатывает LogEntry.
         Вызывается при получении новой строки лога.
@@ -156,31 +204,70 @@ class JsonFileHandler(OutputHandler):
             json.dump(data, f, ensure_ascii=False)
             f.write('\n') # каждая запись на новой строоке
 
-class StatsCollector(OutputHandler):
+
+class EventAwareHandler(OutputHandler):
+    def handle(self, entry: Any) -> None:
+
+        if isinstance(entry, LogEntry):
+            self._handle_log_entry(entry)
+        elif isinstance(entry, Event):
+            self._handle_event(entry)
+        else:
+            logger.warning(f"Неизвестный тип данных: {type(entry)}")
+    
+    def _handle_log_entry(self, entry: LogEntry) -> None:
+        pass
+
+    def _handle_event(self, entry: Event) -> None:
+        pass
+    
+
+
+
+class StatsCollector(EventAwareHandler):
     """Обработчик для сбора статистики."""
 
     def __init__(self):
+        super().__init__()
         self.stats = {
-            "total_lines" : 0,
-            "lines_by_level" : {
-                "ERROR" : 0,
-                "WARN" : 0,
-                "INFO" : 0,
-                "DEBUG" : 0
+            "log_entries": {
+                "total_lines" : 0,
+                "lines_by_level" : {
+                    "ERROR" : 0,
+                    "WARN" : 0,
+                    "INFO" : 0,
+                    "DEBUG" : 0
+                },
             },
-            "start_time" : None,
-            "last_activity" : None
+            "events" : {
+                "file_rotation" : 0,
+                "file_truncated" : 0,
+                "file_error" : 0
+            },
+            "timing" : {
+                "start_time" : None,
+                "last_log_activity" : None,
+                "last_event_activity" : None
+            }
         }
 
-    def handle(self, entry: LogEntry) -> None:
-        """Обновляет статистику на основе LogEntry."""
+    def _handle_log_entry(self, entry: LogEntry) -> None:
+        self.stats['log_entries']['total_lines'] += 1
+        self.stats['log_entries']['lines_by_level'][entry.level] += 1
+        self.stats['timing']['last_log_activity'] = entry.timestamp or datetime.now()
 
-        self.stats['total_lines'] += 1
-        self.stats['lines_by_level'][entry.level] += 1
-        self.stats['last_activity'] = datetime.now().isoformat()
+        if self.stats['timing']['start_time'] is None:
+            self.stats['timing']['start_time'] = entry.timestamp or datetime.now()
 
-        if self.stats["start_time"] is None:
-            self.stats['start_time'] = datetime.now().isoformat()
+
+    def _handle_event(self, entry: Event) -> None:
+        if entry.event_type in self.stats['events']:
+            self.stats['events'][entry.event_type] += 1
+        else:
+            # просто новый тип события добавляем, если он неизвестен
+            self.stats["events"][entry.event_type] = 1
+
+        self.stats['timing']['last_event_activity'] = entry.timestamp
 
     def get_stats(self) -> dict:
         return self.stats.copy()

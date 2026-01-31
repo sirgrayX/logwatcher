@@ -5,6 +5,8 @@ from typing import List, Optional
 from enum import Enum
 from dataclasses import dataclass
 
+from h11 import Event
+
 from .models import LogEntry, LogParser, OutputHandler, RegexLogParser
 from .formatter import ColorFormatter
 from .logger import get_logger
@@ -105,8 +107,8 @@ class LogWatcher:
             self.handlers.remove(handler)
             logger.debug(f"Удалён обработчик: {handler.__class__.__name__}")
 
-    def _notify_handlers(self, entry: LogEntry) -> None:
-        """Уведомляет все обраюотчики о новой LogEntry."""
+    def _notify_handlers(self, entry: LogEntry | Event) -> None:
+        """Уведомляет все обраюотчики о новой LogEntry или Event."""
 
         for handler in self.handlers:
             try:
@@ -146,6 +148,17 @@ class LogWatcher:
     def _check_rotation(self) -> bool:
         try:
             current_inode = os.stat(self.filename).st_ino
+            current_size = os.path.getsize(self.filename)
+
+            if current_inode != self._inode:
+                from .models import FileRotationEvent
+                event = FileRotationEvent(
+                    filename=str(self.filename),
+                    old_inode=self._inode,
+                    new_inode=current_inode
+                )
+
+                self._notify_handlers(event)
             return current_inode != self._inode
         except FileNotFoundError:
             logger.error(f"Файл {self.filename} временно отсутствует.")
@@ -186,8 +199,8 @@ class LogWatcher:
 
     def start(self) -> None:
         """
-    #     Запускает мониторинг файла
-    #     """
+        Запускает мониторинг файла
+        """
         if not self.filename.exists():
             logger.error(f"Файл не найден {self.filename}")
             raise FileNotFoundError(f"{self.filename} не найден!")
@@ -261,6 +274,8 @@ class LogWatcher:
             logger.debug(f"Файл {self.filename} закрыт.")
         self._stop_requested = True
         self._state = WatcherState.STOPPED
+
+        if 
 
     def is_running(self) -> bool:
         """
