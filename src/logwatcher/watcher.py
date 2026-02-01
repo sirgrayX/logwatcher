@@ -1,14 +1,23 @@
+from datetime import datetime
 import os
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, Optional
 from enum import Enum
 from dataclasses import dataclass
 
-from h11 import Event
-
-from .models import LogEntry, LogParser, OutputHandler, RegexLogParser
-from .formatter import ColorFormatter
+from .models import (
+    FileErrorEvent,
+    FileRotationEvent,
+    JsonFileHandler,
+    LogEntry, 
+    LogParser, 
+    OutputHandler, 
+    RegexLogParser, 
+    StatsCollector, 
+    Event,
+    WatcherStateEvent
+)
 from .logger import get_logger
 
 logger = get_logger()
@@ -23,9 +32,12 @@ class WatcherState(Enum):
 @dataclass
 class WatcherConfig:
     """Конфигурация для LogWatcher"""
-    use_colors=False,
+    min_level: str = "WARN"
+    use_colors: bool = False
     check_interval: float = 0.1
     follow_rotation: bool = True
+    use_json: bool = False
+    json_output_file = './LogWatcher_logs.json'
     encoding: str = 'utf-8'
     buffer_size: int = 4096
 
@@ -54,37 +66,49 @@ class LogWatcher:
     def __init__(
             self,
             filename: str | Path,
-            min_level: str = "WARN",
             parser: Optional[LogParser] = None,
-            handlers: Optional[List[OutputHandler]] = None,
             config: Optional[WatcherConfig] = None
     ):
         """
         Args:
             filename (Path | str): Путь к файлу для мониторинга
             parser (LogParser): Парсер для строк логов
-            handlers: Список обработчиков для уведомления
             config: Конфигурация мониторинга
         """
         self.filename = Path(filename)
-        self.min_level = min_level,
+
         self.parser = parser or RegexLogParser()
-        self.handlers = handlers or []
         self.config = config or WatcherConfig()
         self.config.validate()
-
 
         self._state = WatcherState.STOPPED
         self._file = None
         self._inode = None
         self._stop_requested = False
-
         self._retry_count = 0
 
-        logger.debug(f"Создан LogWatcher для файла {self.filename}")
+        self._init_handlers()
+
+    def _init_handlers(self) -> None:
+        from .models import ConsoleHandler
+
+        self._handlers = []
+
+        self._add_handler(ConsoleHandler(
+                use_colors=self.config.use_colors,
+                min_level=self.config.min_level
+            ))
+
+        if self.config.collect_stats:
+            self._add_handler(StatsCollector())
 
 
-    def add_handler(self, handler: OutputHandler) -> None:
+        # ещё не знаю, нужно ли добавлять json
+        # if self.config.use_json:
+        #     self._add_handler(JsonFileHandler())
+        
+
+    def _add_handler(self, handler: OutputHandler) -> None:
         """
         Добавляет обработчик в список наблюдателей.
 
@@ -92,10 +116,10 @@ class LogWatcher:
             handler (OutputHandler): Обработчик для добавления.
         """
 
-        self.handlers.append(handler)
+        self._handlers.append(handler)
         logger.debug(f"Добавлен обработчик: {handler.__class__.__name__}")
 
-    def remove_handler(self, handler: OutputHandler) -> None:
+    def _remove_handler(self, handler: OutputHandler) -> None:
         """
         Удаляет обработчик из списка наблюдателей.
 
@@ -103,18 +127,40 @@ class LogWatcher:
             handler (OutputHandler): Обработчик для удаления.
         """
 
-        if handler in self.handlers:
-            self.handlers.remove(handler)
+        if handler in self._handlers:
+            self._handlers.remove(handler)
             logger.debug(f"Удалён обработчик: {handler.__class__.__name__}")
 
-    def _notify_handlers(self, entry: LogEntry | Event) -> None:
-        """Уведомляет все обраюотчики о новой LogEntry или Event."""
+    def _should_show_log_entry(self, entry: LogEntry) -> bool:
+        """Проверяет, нужно ли показывать запись."""
 
-        for handler in self.handlers:
+        level_priority = {
+            "DEBUG": 0,
+            "INFO": 1,
+            "WARN": 2,
+            "ERROR": 3
+        }
+        
+        entry_priority = level_priority.get(entry.level.upper(), 0)
+        min_priority = level_priority.get(self.config.min_level.upper(), 3)
+        
+        return entry_priority >= min_priority
+
+    def _notify_handlers(self, entry: Event) -> None:
+        """
+        Уведомляет все обработчики о новой LogEntry, 
+        если уровень лога удовлетворяет минимальному.
+
+        Args:
+            entry (LogEntry) : данные из обработанной строки
+        """
+
+        for handler in self._handlers:
             try:
                 handler.handle(entry)
             except Exception as e:
                 logger.error(f"Ошибка в обработчике {handler.__class__.__name__}: {e}")
+    
 
     def _process_line(self, line: str) -> None:
         """
@@ -123,13 +169,20 @@ class LogWatcher:
         Args:
             line: строка лога для обработки.
         """
-
         try:
             entry: LogEntry = self.parser.parse(line)
             entry.src = str(self.filename)
-            self._notify_handlers(entry)
+
+            # это запись лога, отправляем по фильтру min_level
+            if self._should_show_log_entry(entry):
+                self._notify_handlers(entry)
         except Exception as e:
-            logger.error(f"Ошибка обработки строки: {e}", exc_info=True)
+            # событие ошибки обработки
+            error_event = FileErrorEvent(
+                filename=str(self.filename),
+                error=f"line_processing_error: {str(e)}"
+            )
+            self._notify_handlers(error_event)
         
     def _open_file(self) -> None:
         if self._file and not self._file.closed:
@@ -143,40 +196,41 @@ class LogWatcher:
             logger.debug(f"Файл {self.filename} открыт: {self._inode}")
         except Exception as e:
             logger.error(f"Ошибка открытия файла {self.filename}: {e}")
+            # событие ошибки открытия файла
+            error_event = FileErrorEvent(
+                filename=str(self.filename),
+                error=f"file_open_error: {str(e)}"
+            )
+            self._notify_handlers(error_event)
             raise
     
     def _check_rotation(self) -> bool:
+        """Проверяет ротацию и создаёт событие."""
         try:
             current_inode = os.stat(self.filename).st_ino
-            current_size = os.path.getsize(self.filename)
-
+            
             if current_inode != self._inode:
-                from .models import FileRotationEvent
-                event = FileRotationEvent(
+                # событие ротации
+                rotation_event = FileRotationEvent(
                     filename=str(self.filename),
                     old_inode=self._inode,
                     new_inode=current_inode
                 )
-
-                self._notify_handlers(event)
-            return current_inode != self._inode
+                
+                self._notify_handlers(rotation_event)
+                
+                self._inode = current_inode
+                return True
+                
         except FileNotFoundError:
-            logger.error(f"Файл {self.filename} временно отсутствует.")
-            return False
-    
-    def _read_new_data(self) -> None:
-        current_position = self._file.tell()
-        file_size = os.path.getsize(self.filename)
-            
-        if current_position > file_size:
-            logger.info("Файл усечен, перемещаюсь в начало")
-            self._file.seek(0)
-        else:
-            self._file.seek(current_position)
-
-        line = self._file.readline()
-        if line:
-            self._process_line(line.rstrip('\n\r'))
+            # событие ошибки
+            error_event = FileErrorEvent(
+                filename=str(self.filename),
+                error="file_not_found"
+            )
+            self._notify_handlers(error_event)
+        
+        return False
 
     def _handle_read_error(self) -> None:
         if self.config.restart_on_error:
@@ -203,18 +257,29 @@ class LogWatcher:
         """
         if not self.filename.exists():
             logger.error(f"Файл не найден {self.filename}")
+            error_event = FileErrorEvent(
+                filename=str(self.filename),
+                error="file_not_found_on_start"
+            )
+            self._notify_handlers(error_event)
             raise FileNotFoundError(f"{self.filename} не найден!")
         
         self._state = WatcherState.RUNNING
         self._stop_requested = False
 
         logger.info(f"Запуск мониторинга файла: {self.filename}")
-        logger.info(f"Минимальный уровень: {self.min_level}")
+        logger.info(f"Минимальный уровень: {self.config.min_level}")
         logger.info(f"Конфигурация: interval=%.2fs, rotation=%s",
                    self.config.check_interval, self.config.follow_rotation)
 
         try:
             self._open_file()
+            state_event = WatcherStateEvent(
+                watcher_id=str(id(self)),
+                old_state="stopped",
+                new_state="running"
+            )
+            self._notify_handlers(state_event)
             
             while not self._stop_requested and self._state == WatcherState.RUNNING:
                 try:
@@ -226,11 +291,12 @@ class LogWatcher:
                     # если была ротация файла логов
                     if self.config.follow_rotation and self._check_rotation():
                         logger.info("Переоткрываю файл после ротации")
-                        # self.stats['rotations_detected'] += 1
-                        # добавить подсчёт ротаций файла
                         self._open_file()
 
-                    self._read_new_data()
+                    if self._file:
+                        line = self._file.readline()
+                        if line:
+                            self._process_line(line.rstrip('\n\r'))
 
                     self._retry_count = 0
 
@@ -244,7 +310,6 @@ class LogWatcher:
         except Exception as e:
             logger.error(f"Ошибка при исполнении процесса мониторинга {e}", exc_info=True)
             self._state = WatcherState.ERROR
-            # добавить обработку подсчёта ошибок самой программы
             raise
         finally:
             self.stop()
@@ -275,7 +340,22 @@ class LogWatcher:
         self._stop_requested = True
         self._state = WatcherState.STOPPED
 
-        if 
+        state_event = WatcherStateEvent(
+            watcher_id=str(id(self)),
+            old_state="running",
+            new_state=self._state.value
+        )
+        self._notify_handlers(state_event)
+
+
+        if self.config.collect_stats:
+            self.get_stats()
+
+    def get_stats(self):
+        for handler in self._handlers:
+            if (handler, StatsCollector):
+                return handler.get_stats()
+        
 
     def is_running(self) -> bool:
         """
