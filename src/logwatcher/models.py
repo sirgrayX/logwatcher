@@ -174,12 +174,11 @@ class WatcherStateEvent(SystemEvent):
         return f"[STATE] {self.watcher_id}: {self.old_state} → {self.new_state}"
 
 
-        
 class LogParser(ABC):
     """Абстрактный класс парсера логов."""
 
     @abstractmethod
-    def parse(self, line: str) -> LogEntry:
+    def parse(self, line: str) -> Optional[LogEntry]:
         pass
 
 class OutputHandler(ABC):
@@ -201,41 +200,61 @@ class OutputHandler(ABC):
 # классы -- наследники LogParser (паттерн Стратегия)
 class RegexLogParser(LogParser):
     def __init__(self, pattern: Optional[str] = None) -> None:
-        self.pattern = pattern or r"(\w+)\s*[:\[\]]\s*(.+)"
-        self.compiled_pattern: Pattern = re.compile(self.pattern)
+        # Паттерн для разных форматов:
+        # 1. timestamp level: message
+        # 2. level: message
+        # 3. [level] message
+        self.pattern = pattern or (
+            r'^(?:(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+)?'
+            r'(?:\[?(?P<level>ERROR|WARN(?:ING)?|INFO|DEBUG|FATAL)\]?:\s*)?'
+            r'(?P<message>.+)$'
+        )
+        self.compiled_pattern: Pattern = re.compile(self.pattern, re.IGNORECASE)
+        self.valid_levels = {"ERROR", "WARN", "WARNING", "INFO", "DEBUG", "FATAL"}
 
-    def parse(self, line: str) -> LogEntry:
+    def parse(self, line: str) -> Optional[LogEntry]:
         """
         Парсит строку лога с помощью regexp.
+        Поддерживает форматы:
+        - "2024-01-15 10:24:15 WARN: High memory usage"
+        - "ERROR: Database connection failed"
+        - "[INFO] Application started"
+        - "Just a plain message" (будет INFO по умолчанию)
 
-        1. Пытаемся найти соответсвие паттерну;
-        2. Если найдено - извлекаем уровень и сообщение;
-        3. Если не найдено - считаем всю строку сообщением с уровенем INFO.
-
+        Возвращает None для пустых строк.
+        
         Args:
             line (str): Строка для парсинга
-
-        Returns:
-            LogEntry: Объект с распарсенными данными.
         """
-
         line = line.strip()
-
+        
+        if not line:
+            return None
+        
         match = self.compiled_pattern.match(line)
-
+        
         level = "INFO"
         message = line
-
+        
         if match:
-            groups = match.groups()
-            if len(groups) >= 2:
-                level = groups[0].upper()
-                message = groups[1].strip()
+            groups = match.groupdict()
             
-        valid_levels = {"ERROR", "WARN", "WARNING", "INFO", "DEBUG"}
-
-        if level not in valid_levels:
-            level = next((vl for vl in valid_levels if vl in line.upper()), "INFO")
+            if groups.get('level'):
+                extracted_level = groups['level'].upper()
+                if extracted_level == "WARNING":
+                    extracted_level = "WARN" 
+                if extracted_level in self.valid_levels:
+                    level = extracted_level
+            
+            if groups.get('message'):
+                message = groups['message'].strip()
+        
+        if level == "INFO" or level not in self.valid_levels:
+            line_upper = line.upper()
+            for valid_level in self.valid_levels:
+                if valid_level in line_upper:
+                    level = "WARN" if valid_level == "WARNING" else valid_level
+                    break
         
         return LogEntry(
             raw_message=line,
@@ -244,7 +263,6 @@ class RegexLogParser(LogParser):
         )
     
 # классы -- наследники OutputHandler (паттерн Наблюдатель)
-
 class ConsoleHandler(OutputHandler):
     """Обработчик для вывода в консоль."""
 

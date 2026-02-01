@@ -2,14 +2,13 @@ from datetime import datetime
 import os
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 from enum import Enum
 from dataclasses import dataclass
 
 from .models import (
     FileErrorEvent,
     FileRotationEvent,
-    JsonFileHandler,
     LogEntry, 
     LogParser, 
     OutputHandler, 
@@ -37,7 +36,7 @@ class WatcherConfig:
     check_interval: float = 0.1
     follow_rotation: bool = True
     use_json: bool = False
-    json_output_file = './LogWatcher_logs.json'
+    json_output_file: str = './LogWatcher_logs.json'
     encoding: str = 'utf-8'
     buffer_size: int = 4096
 
@@ -94,21 +93,16 @@ class LogWatcher:
 
         self._handlers = []
 
-        self._add_handler(ConsoleHandler(
+        self.add_handler(ConsoleHandler(
                 use_colors=self.config.use_colors,
                 min_level=self.config.min_level
             ))
 
         if self.config.collect_stats:
-            self._add_handler(StatsCollector())
+            self.add_handler(StatsCollector())
 
 
-        # ещё не знаю, нужно ли добавлять json
-        # if self.config.use_json:
-        #     self._add_handler(JsonFileHandler())
-        
-
-    def _add_handler(self, handler: OutputHandler) -> None:
+    def add_handler(self, handler: OutputHandler) -> None:
         """
         Добавляет обработчик в список наблюдателей.
 
@@ -119,7 +113,7 @@ class LogWatcher:
         self._handlers.append(handler)
         logger.debug(f"Добавлен обработчик: {handler.__class__.__name__}")
 
-    def _remove_handler(self, handler: OutputHandler) -> None:
+    def remove_handler(self, handler: OutputHandler) -> None:
         """
         Удаляет обработчик из списка наблюдателей.
 
@@ -138,7 +132,9 @@ class LogWatcher:
             "DEBUG": 0,
             "INFO": 1,
             "WARN": 2,
-            "ERROR": 3
+            "ERROR": 3,
+            "CRITICAL" : 4,
+            "FATAL" : 5
         }
         
         entry_priority = level_priority.get(entry.level.upper(), 0)
@@ -170,8 +166,11 @@ class LogWatcher:
             line: строка лога для обработки.
         """
         try:
-            entry: LogEntry = self.parser.parse(line)
+            entry: Optional[LogEntry] = self.parser.parse(line)
+            if entry is None:
+                return
             entry.src = str(self.filename)
+
 
             # это запись лога, отправляем по фильтру min_level
             if self._should_show_log_entry(entry):
@@ -267,11 +266,6 @@ class LogWatcher:
         self._state = WatcherState.RUNNING
         self._stop_requested = False
 
-        logger.info(f"Запуск мониторинга файла: {self.filename}")
-        logger.info(f"Минимальный уровень: {self.config.min_level}")
-        logger.info(f"Конфигурация: interval=%.2fs, rotation=%s",
-                   self.config.check_interval, self.config.follow_rotation)
-
         try:
             self._open_file()
             state_event = WatcherStateEvent(
@@ -348,13 +342,11 @@ class LogWatcher:
         self._notify_handlers(state_event)
 
 
-        if self.config.collect_stats:
-            self.get_stats()
-
     def get_stats(self):
         for handler in self._handlers:
-            if (handler, StatsCollector):
+            if isinstance(handler, StatsCollector):
                 return handler.get_stats()
+        return None
         
 
     def is_running(self) -> bool:
